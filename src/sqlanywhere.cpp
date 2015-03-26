@@ -11,70 +11,115 @@ uv_mutex_t api_mutex;
 
 extern Persistent<String> HashToString( Local<Object> obj );
 
-struct executeBaton {
-    Persistent<Function> 		callback;
-    bool 				err;
-    std::string 			error_msg;
-    bool 				callback_required;
-    
-    Connection 				*obj;
-    a_sqlany_stmt 			*sqlany_stmt;
-    std::string				stmt;
-    std::vector<char*> 			string_vals;
-    std::vector<double*> 		num_vals;
-    std::vector<int*> 			int_vals;
-    std::vector<size_t*> 		string_len;
-    std::vector<a_sqlany_bind_param> 	params;
-    
-    std::vector<char*> 			colNames;
-    int 				rows_affected;
-    std::vector<a_sqlany_data_type> 	col_types;
+struct resultBaton {
+	Local<Value>						resultset;
+	std::vector<a_sqlany_data_type> 	col_types;
+	std::vector<char*> 					string_vals;
+	std::vector<double> 				num_vals;
+	std::vector<int> 					int_vals;
+	std::vector<size_t> 				string_len;
+	std::vector<char*> 					colNames;
 
-    executeBaton() {
-	err = false;
-	callback_required = false;
-	obj = NULL;
-	sqlany_stmt = NULL;
-	rows_affected = -1;
-    }
+	resultBaton() {
 
-    ~executeBaton() {
-	obj = NULL;
-	// the StmtObject will free sqlany_stmt
-	sqlany_stmt = NULL;
-	CLEAN_STRINGS( string_vals );
-	CLEAN_STRINGS( colNames );
-	CLEAN_NUMS( num_vals );
-	CLEAN_NUMS( int_vals );
-	CLEAN_NUMS( string_len );
-	col_types.clear();
+	}
 
-	for( size_t i = 0; i < params.size(); i++ ) {
-	    if( params[i].value.is_null != NULL ) {
-		delete params[i].value.is_null;
-		params[i].value.is_null = NULL;
-	    }
-        }
-	params.clear();
-    }
+	~resultBaton() {
+		for (size_t i = 0; i < string_vals.size(); i++) {
+			delete string_vals[i];
+		}
+
+		for (size_t i = 0; i < colNames.size(); i++) {
+			delete colNames[i];
+		}
+
+		col_types.clear();
+		string_vals.clear();
+		num_vals.clear();
+		int_vals.clear();
+		string_len.clear();
+		colNames.clear();
+	}
 };
 
-bool fillResult( executeBaton *baton, Local<Value> &ResultSet ) 
+struct executeBaton {
+	Persistent<Function> callback;
+	bool								err;
+	std::string							error_msg;
+	bool								callback_required;
+
+	Connection 							*obj;
+	a_sqlany_stmt 						*sqlany_stmt;
+	std::string							stmt;
+	std::vector<a_sqlany_bind_param> 	params;
+	std::vector<resultBaton>			resultsets;
+	int									resultset_count;
+	int 								rows_affected;
+
+	executeBaton() {
+		err = false;
+		callback_required = false;
+		obj = NULL;
+		sqlany_stmt = NULL;
+		resultset_count = 0;
+		rows_affected = -1;
+	}
+
+	~executeBaton() {
+		obj = NULL;
+		// the StmtObject will free sqlany_stmt
+		sqlany_stmt = NULL;
+
+		for (size_t i = 0; i < params.size(); i++) {
+			if (params[i].value.is_null != NULL) {
+				delete params[i].value.is_null;
+				params[i].value.is_null = NULL;
+			}
+		}
+		params.clear();
+		resultsets.clear();
+	}
+};
+
+Local<Array> processResults(executeBaton *baton)
 {
-    
-    if( baton->err ) {
-	callBack( &( baton->error_msg ), baton->callback, Local<Value>::New( Undefined() ), baton->callback_required );
-	return false;
-    }
-    
-    if( !getResultSet( ResultSet, baton->rows_affected, baton->colNames, baton->string_vals, baton->num_vals, baton->int_vals, baton->string_len, baton->col_types ) ) {
-	getErrorMsg( JS_ERR_RESULTSET, baton->error_msg );
-	callBack( &( baton->error_msg ), baton->callback , Local<Value>::New( Undefined() ), baton->callback_required );
-	return false;
-    }
-    
-    callBack( NULL, baton->callback, ResultSet,  baton->callback_required );
-    return true;
+	if (baton->err) {
+		callBack(&(baton->error_msg), baton->callback, Local<Value>::New(Undefined()), baton->callback_required);
+		return Array::New(0);
+	}
+
+	int trueResultCount = 0;
+	for (size_t i = 0; i < baton->resultset_count; i++) {
+		resultBaton *result_baton = &baton->resultsets[i];
+		if (!getResultSet(result_baton->resultset, baton->rows_affected, result_baton->colNames, result_baton->string_vals, result_baton->num_vals, result_baton->int_vals, result_baton->string_len, result_baton->col_types)) {
+			baton->err = true;
+			getErrorMsg(JS_ERR_RESULTSET, baton->error_msg);
+			break;
+		}
+
+		if (baton->resultsets[i].colNames.size() != 0) {
+			trueResultCount++;
+		}
+	}
+
+	Local<Array> resultsets = Array::New(trueResultCount);
+	for (size_t i = 0; i < trueResultCount; i++)
+	{
+		resultsets->Set(i, baton->resultsets[i].resultset);
+	}
+
+	//Main result callback - only return multiple result sets if we care calling an SP and we have multiple results
+	if (trueResultCount == 0){
+		callBack(NULL, baton->callback, Local<Value>::New(Undefined()), baton->callback_required);
+	}
+	else if (trueResultCount == 1) {
+		callBack(NULL, baton->callback, resultsets->Get(0), baton->callback_required);
+	}
+	else {
+		callBack(NULL, baton->callback, resultsets, baton->callback_required);
+	}
+
+	return resultsets;
 }
 
 void executeWork( uv_work_t *req ) 
@@ -108,58 +153,64 @@ void executeWork( uv_work_t *req )
 	return;
     }
 
-    for( unsigned int i = 0; i < baton->params.size(); i++ ) {
-	a_sqlany_bind_param 	param;
-	
-	if( !api.sqlany_describe_bind_param( baton->sqlany_stmt, i, &param ) ) {
-	    baton->err = true;
-	    getErrorMsg( baton->obj->conn, baton->error_msg );
-	    return;
+	for (unsigned int i = 0; i < baton->params.size(); i++) {
+		a_sqlany_bind_param 	param;
+
+		if (!api.sqlany_describe_bind_param(baton->sqlany_stmt, i, &param)) {
+			baton->err = true;
+			getErrorMsg(baton->obj->conn, baton->error_msg);
+			return;
+		}
+
+		param.value.type = baton->params[i].value.type;
+		param.value.buffer = baton->params[i].value.buffer;
+
+		if (param.value.type == A_STRING || param.value.type == A_BINARY) {
+			param.value.length = baton->params[i].value.length;
+			param.value.buffer_size = baton->params[i].value.buffer_size;
+		}
+
+		if (baton->params[i].value.is_null != NULL) {
+			param.value.is_null = baton->params[i].value.is_null;
+		}
+
+		if (!api.sqlany_bind_param(baton->sqlany_stmt, i, &param)) {
+			baton->err = true;
+			getErrorMsg(baton->obj->conn, baton->error_msg);
+			return;
+		}
 	}
-	
-	param.value.type = baton->params[i].value.type;
-	param.value.buffer = baton->params[i].value.buffer;
-	
-	if( param.value.type == A_STRING || param.value.type == A_BINARY ) {
-	    param.value.length = baton->params[i].value.length;
-	    param.value.buffer_size = baton->params[i].value.buffer_size;
-	}
-	
-	if( baton->params[i].value.is_null != NULL ) {
-	    param.value.is_null = baton->params[i].value.is_null;
-	}
-	
-	if( !api.sqlany_bind_param( baton->sqlany_stmt, i, &param ) ) {
-	    baton->err = true;
-	    getErrorMsg( baton->obj->conn, baton->error_msg );
-	    return;
-	}
-    }
     
     sacapi_bool success_execute = api.sqlany_execute( baton->sqlany_stmt );
-    CLEAN_STRINGS( baton->string_vals );
-    CLEAN_NUMS( baton->int_vals );
-    CLEAN_NUMS( baton->num_vals );
-    baton->string_len.clear();
+	baton->resultsets.clear();
+	baton->resultset_count = 0;
     
     if( !success_execute ) {
 	baton->err = true;
 	getErrorMsg( baton->obj->conn, baton->error_msg );
 	return;
     }
-    
-    if( !fetchResultSet( baton->sqlany_stmt, baton->rows_affected, baton->colNames, baton->string_vals, baton->num_vals, baton->int_vals, baton->string_len, baton->col_types ) ) {
-	baton->err = true;
-	getErrorMsg( baton->obj->conn, baton->error_msg );
-	return;
-    }
+
+	do {
+		resultBaton *result_baton = new resultBaton();
+
+		if (!fetchResultSet(baton->sqlany_stmt, baton->rows_affected, result_baton->colNames, result_baton->string_vals,
+			result_baton->num_vals, result_baton->int_vals, result_baton->string_len, result_baton->col_types)) {
+			baton->err = true;
+			getErrorMsg(baton->obj->conn, baton->error_msg);
+			return;
+		}
+
+		baton->resultsets.push_back(*result_baton);
+		baton->resultset_count++;
+
+	} while (api.sqlany_get_next_result(baton->sqlany_stmt));
 }
 
 void executeAfter( uv_work_t *req ) 
 {
     executeBaton *baton = static_cast<executeBaton*>( req->data );
-    Local<Value> ResultSet;
-    fillResult( baton, ResultSet );
+	processResults(baton);
 
     scoped_lock	lock( baton->obj->conn_mutex );
 
@@ -212,43 +263,48 @@ Handle<Value> StmtObject::exec( const Arguments &args )
     baton->obj = obj->connection;
     baton->sqlany_stmt = obj->sqlany_stmt;
     baton->callback_required = callback_required;
-    
-    if( bind_required ) {
-	if( !getBindParameters( baton->string_vals, baton->num_vals, baton->int_vals, baton->string_len, args[0], baton->params ) ) {
-	    std::string error_msg;
-	    getErrorMsg( JS_ERR_BINDING_PARAMETERS, error_msg );
-	    callBack( &( error_msg ), args[cbfunc_arg] , Local<Value>::New( Undefined() ), callback_required );
-	    return scope.Close( Undefined() );
-	}
-    }
 
     uv_work_t *req = new uv_work_t();
     req->data = baton;
+
+	if (bind_required) {
+		if (!getBindParameters(args[0], baton->params)) {
+			getErrorMsg(JS_ERR_BINDING_PARAMETERS, baton->error_msg);
+			baton->err = true;
+			return scope.Close(Undefined());
+		}
+	}
     
-    if( callback_required ) {
-	Local<Function> callback = Local<Function>::Cast(args[cbfunc_arg]);
-	baton->callback = Persistent<Function>::New( callback );
-	
-	int status;
-	status = uv_queue_work( uv_default_loop(), req, executeWork, (uv_after_work_cb)executeAfter );
-	assert(status == 0);
-	
-	return scope.Close( Undefined() );
-    }
-    
-    Local<Value> ResultSet;
-    
+	if (callback_required) {
+		Local<Function> callback = Local<Function>::Cast(args[cbfunc_arg]);
+		baton->callback = Persistent<Function>::New(callback);
+
+		int status;
+		status = uv_queue_work(uv_default_loop(), req, executeWork, (uv_after_work_cb)executeAfter);
+		assert(status == 0);
+
+		return scope.Close(Undefined());
+	}
+      
     executeWork( req );
-    bool success = fillResult( baton, ResultSet );
+	Local<Array> resultsets = processResults(baton);
+	bool err = baton->err;
+	int resultSetCount = baton->resultset_count;
+
     delete baton;
     delete req;
     
-    if( !success ) {
-	return scope.Close( Undefined() );
-    }
-    return scope.Close( ResultSet );
+	if (err) {
+		return scope.Close(Undefined());
+	}
+	else if (resultSetCount == 0) {
+		return scope.Close(Undefined());
+	}
+	else {
+		//Return first result set only to calling function in sync mode (So as not to break the function definition) but return multiple result sets in callback for async
+		return scope.Close(resultsets->Get(0));
+	}
 }
-
 
 Handle<Value> Connection::exec( const Arguments &args ) 
 {
@@ -297,45 +353,50 @@ Handle<Value> Connection::exec( const Arguments &args )
     baton->callback_required = callback_required;
     baton->stmt = std::string(*param0);
     
-    if( bind_required ) {
-	if( !getBindParameters( baton->string_vals, baton->num_vals, baton->int_vals, baton->string_len, args[1], baton->params ) ) {
-	    std::string error_msg;
-	    getErrorMsg( JS_ERR_BINDING_PARAMETERS, error_msg );
-	    callBack( &( error_msg ), args[cbfunc_arg] , Local<Value>::New( Undefined() ), callback_required );
-	    return scope.Close( Undefined() );
-	}
-    }
-    
     uv_work_t *req = new uv_work_t();
     req->data = baton;
+
+	if (bind_required) {
+		if (!getBindParameters(args[1], baton->params)) {
+			getErrorMsg(JS_ERR_BINDING_PARAMETERS, baton->error_msg);
+			baton->err = true;
+			return scope.Close(Undefined());
+		}
+	}
     
-    if( callback_required ) {
-	Local<Function> callback = Local<Function>::Cast(args[cbfunc_arg]);
-	baton->callback = Persistent<Function>::New( callback );
-	
-	int status;
-	status = uv_queue_work( uv_default_loop(), req, executeWork, (uv_after_work_cb)executeAfter );
-	assert(status == 0);
-	
-	return scope.Close( Undefined() );
-    }
-    
-    Local<Value> ResultSet;
+	if (callback_required) {
+		Local<Function> callback = Local<Function>::Cast(args[cbfunc_arg]);
+		baton->callback = Persistent<Function>::New(callback);
+
+		int status;
+		status = uv_queue_work(uv_default_loop(), req, executeWork, (uv_after_work_cb)executeAfter);
+		assert(status == 0);
+
+		return scope.Close(Undefined());
+	}
     
     executeWork( req );
-    bool success = fillResult( baton, ResultSet );
+	Local<Array> resultsets = processResults(baton);
+	bool err = baton->err;
+	int resultSetCount = baton->resultset_count;
 
-    if( baton->sqlany_stmt != NULL ) {
-	api.sqlany_free_stmt( baton->sqlany_stmt );
-    }
-    
-    delete baton;
-    delete req;
-    
-    if( !success ) {
-	return scope.Close( Undefined() );
-    }
-    return scope.Close( ResultSet );
+	if (baton->sqlany_stmt != NULL) {
+		api.sqlany_free_stmt(baton->sqlany_stmt);
+	}
+
+	delete baton;
+	delete req;
+
+	if (err) {
+		return scope.Close(Undefined());
+	}
+	else if (resultSetCount == 0) {
+		return scope.Close(Undefined());
+	}
+	else {
+		//Return first result set only to calling function in sync mode (So as not to break the function definition) but return multiple result sets in callback for async
+		return scope.Close(resultsets->Get(0));
+	}
 }
 
 struct prepareBaton {

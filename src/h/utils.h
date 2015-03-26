@@ -32,22 +32,6 @@ extern SQLAnywhereInterface api;
 extern unsigned openConnections;
 extern uv_mutex_t api_mutex;
 
-#define CLEAN_STRINGS( vector )      		\
-{                                          	\
-    for( size_t i = 0; i < vector.size(); i++ ) { 	\
-	delete[] vector[i];			\
-    }						\
-    vector.clear();				\
-}
-
-#define CLEAN_NUMS( vector )      		\
-{                                          	\
-    for( size_t i = 0; i < vector.size(); i++ ) { 	\
-	delete vector[i];			\
-    }						\
-    vector.clear();				\
-}
-
 class scoped_lock
 {
     public:
@@ -74,31 +58,26 @@ void throwError( int code );
 
 void callBack( std::string *str, Persistent<Function> callback, Local<Value> Result, bool callback_required = true );
 void callBack( std::string *str, Local<Value> callback, Local<Value> Result, bool callback_required = true );
+void callBack(std::string *str, Persistent<Function> callback, Local<Array> resultsets, bool callback_required = true);
 
-bool getBindParameters( std::vector<char*>			&string_params
-		      , std::vector<double*>			&num_params
-		      , std::vector<int*>			&int_params
-		      , std::vector<size_t*>			&string_len
-		      , Handle<Value> 				arg
-		      , std::vector<a_sqlany_bind_param> 	&params
-		      );
+bool getBindParameters(Handle<Value> arg, std::vector<a_sqlany_bind_param> 	&params);
 		   
 bool getResultSet( Local<Value> 		&Result   
 		 , int 				&rows_affected
-		 , std::vector<char *> 		&colNames
+		 , std::vector<char*> 		&colNames
 		 , std::vector<char*> 		&string_vals
-		 , std::vector<double*>		&num_vals
-		 , std::vector<int*> 		&int_vals
-		 , std::vector<size_t*> 	&string_len
+		 , std::vector<double>		&num_vals
+		 , std::vector<int> 		&int_vals
+		 , std::vector<size_t> 	&string_len
 		 , std::vector<a_sqlany_data_type> 	&col_types );
 		 
 bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		   , int 				&rows_affected
-		   , std::vector<char *> 		&colNames
+		   , std::vector<char*> 		&colNames
 		   , std::vector<char*> 		&string_vals
-		   , std::vector<double*>		&num_vals
-		   , std::vector<int*> 			&int_vals
-		   , std::vector<size_t*> 		&string_len
+		   , std::vector<double>		&num_vals
+		   , std::vector<int> 			&int_vals
+		   , std::vector<size_t> 		&string_len
 		   , std::vector<a_sqlany_data_type> 	&col_types );
 
 struct noParamBaton {

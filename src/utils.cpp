@@ -143,13 +143,44 @@ void callBack( std::string *str, Local<Value> arg, Local<Value> Result, bool cal
     return;
 }
 
-bool getBindParameters( std::vector<char*>			&string_params
-		      , std::vector<double*>			&num_params
-		      , std::vector<int*>			&int_params
-		      , std::vector<size_t*>			&string_len
-		      , Handle<Value> 				arg
-		      , std::vector<a_sqlany_bind_param> 	&params
-		      ) 
+void callBack(std::string *str, Persistent<Function> callback, Local<Array> resultsets, bool callback_required)
+{
+	// If string is NULL, then there is no error
+	if (callback_required) {
+		if (!callback->IsFunction()) {
+			throwError(JS_ERR_INVALID_ARGUMENTS);
+			return;
+		}
+
+		Local<Value> Err;
+		if (str == NULL) {
+			Err = Local<Value>::New(Undefined());
+
+		}
+		else {
+			Err = Exception::Error(String::New(str->c_str()));
+		}
+
+		int argc = 2;
+		Local<Value> argv[2] = { Err,  resultsets };
+
+		TryCatch try_catch;
+		callback->Call(Context::GetCurrent()->Global(), argc, argv);
+		if (try_catch.HasCaught()) {
+			node::FatalException(try_catch);
+		}
+		callback.Dispose();
+
+	}
+	else {
+		if (str != NULL) {
+			ThrowException(Exception::Error(String::New(str->c_str())));
+		}
+	}
+	return;
+}
+
+bool getBindParameters( Handle<Value> arg, std::vector<a_sqlany_bind_param> &params) 
 {
 		   
     Handle<Array>		bind_params = Handle<Array>::Cast( arg );
@@ -160,14 +191,12 @@ bool getBindParameters( std::vector<char*>			&string_params
 	if( bind_params->Get(i)->IsInt32() ) {
 	    int *param_int = new int;
 	    *param_int = bind_params->Get(i)->Int32Value();
-	    int_params.push_back( param_int );
 	    param.value.buffer = (char *)( param_int );
 	    param.value.type   = A_VAL32;
 	    
 	} else if( bind_params->Get(i)->IsNumber() ) {
 	    double *param_double = new double;
 	    *param_double = bind_params->Get(i)->NumberValue(); // Remove Round off Error
-	    num_params.push_back( param_double );
 	    param.value.buffer = (char *)( param_double );
 	    param.value.type   = A_DOUBLE;
 	
@@ -175,13 +204,9 @@ bool getBindParameters( std::vector<char*>			&string_params
 	    String::Utf8Value paramValue( bind_params->Get(i)->ToString() );
 	    const char* param_string = (*paramValue);
 	    size_t *len = new size_t;
-	    *len = (size_t)paramValue.length();
-	    
-	    char *param_char = new char[*len + 1];
-	    
+	    *len = (size_t)paramValue.length();    
+	    char *param_char = new char[*len + 1];    
 	    memcpy( param_char, param_string, ( *len ) + 1 );
-	    string_params.push_back( param_char );
-	    string_len.push_back( len );
 	    
 	    param.value.type = A_STRING;
 	    param.value.buffer = param_char;
@@ -193,8 +218,6 @@ bool getBindParameters( std::vector<char*>			&string_params
 	    *len = Buffer::Length( bind_params->Get(i) );
 	    char *param_char = new char[*len];
 	    memcpy( param_char, Buffer::Data( bind_params->Get(i) ), *len );
-	    string_params.push_back( param_char );
-	    string_len.push_back( len );
 	    
 	    param.value.type = A_BINARY;
 	    param.value.buffer = param_char;
@@ -218,11 +241,11 @@ bool getBindParameters( std::vector<char*>			&string_params
 
 bool getResultSet( Local<Value> 			&Result   
 		 , int 					&rows_affected
-		 , std::vector<char *> 			&colNames
+		 , std::vector<char*> 			&colNames
 		 , std::vector<char*> 			&string_vals
-		 , std::vector<double*>			&num_vals
-		 , std::vector<int*> 			&int_vals
-		 , std::vector<size_t*> 		&string_len
+		 , std::vector<double>			&num_vals
+		 , std::vector<int> 			&int_vals
+		 , std::vector<size_t> 		&string_len
 		 , std::vector<a_sqlany_data_type> 	&col_types ) {
 		   
     int 	num_rows = 0;
@@ -258,10 +281,8 @@ bool getResultSet( Local<Value> 			&Result
 			if( int_vals[count_int] == NULL ) {
 			    curr_row->Set( String::NewSymbol( colNames[i] ), Null() );
 			} else {
-			    curr_row->Set( String::NewSymbol( colNames[i] ), Integer::New( *int_vals[count_int] ) );
+			    curr_row->Set( String::NewSymbol( colNames[i] ), Integer::New( int_vals[count_int] ) );
 			}
-			delete int_vals[count_int];
-			int_vals[count_int] = NULL;
 			count_int++;
 			break;
 			
@@ -272,10 +293,8 @@ bool getResultSet( Local<Value> 			&Result
 			if( num_vals[count_num] == NULL ) {
 			    curr_row->Set( String::NewSymbol( colNames[i] ), Null() );
 			} else {
-			    curr_row->Set( String::NewSymbol( colNames[i] ), Number::New( *num_vals[count_num] ) );
+			    curr_row->Set( String::NewSymbol( colNames[i] ), Number::New( num_vals[count_num] ) );
 			}
-			delete num_vals[count_num];
-			num_vals[count_num] = NULL;
 			count_num++;
 			break;
 			
@@ -283,14 +302,10 @@ bool getResultSet( Local<Value> 			&Result
 			if( string_vals[count_string] == NULL ) {
 			    curr_row->Set( String::NewSymbol( colNames[i] ), Null() );
 			} else {
-			    Buffer *bp = Buffer::New( *string_len[count_string] );
-			    memcpy( Buffer::Data(bp), string_vals[count_string], *string_len[count_string] );
+			    Buffer *bp = Buffer::New( string_len[count_string] );
+			    memcpy( Buffer::Data(bp), &string_vals[count_string], string_len[count_string] );
 			    curr_row->Set( String::NewSymbol( colNames[i] ), bp->handle_ ) ;
 			}
-			delete string_vals[count_string];
-			delete string_len[count_string];
-			string_vals[count_string] = NULL;
-			string_len[count_string] = NULL;
 			count_string++;
 			break;
 			
@@ -298,12 +313,8 @@ bool getResultSet( Local<Value> 			&Result
 			if( string_vals[count_string] == NULL ) {
 			    curr_row->Set( String::NewSymbol( colNames[i] ), Null() );
 			} else {
-			    curr_row->Set( String::NewSymbol( colNames[i] ), String::New( string_vals[count_string], *( (int*)string_len[count_string] ) ) );
+			    curr_row->Set( String::NewSymbol( colNames[i] ), String::New( string_vals[count_string], (int)string_len[count_string] ) );
 			}
-			delete string_vals[count_string];
-			delete string_len[count_string];
-			string_vals[count_string] = NULL;
-			string_len[count_string] = NULL;
 			count_string++;
 			break;
 			
@@ -326,10 +337,10 @@ bool getResultSet( Local<Value> 			&Result
 bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		   , int 				&rows_affected
 		   , std::vector<char *> 		&colNames
-		   , std::vector<char*> 		&string_vals
-		   , std::vector<double*>		&num_vals
-		   , std::vector<int*> 			&int_vals
-		   , std::vector<size_t*> 		&string_len
+		   , std::vector<char *> 		&string_vals
+		   , std::vector<double>		&num_vals
+		   , std::vector<int> 			&int_vals
+		   , std::vector<size_t> 		&string_len
 		   , std::vector<a_sqlany_data_type> 	&col_types ) {
     
     a_sqlany_data_value		value;
@@ -378,7 +389,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 			char *val = new char[ *size ];
 			memcpy( val, value.buffer, *size );
 			string_vals.push_back( val );
-			string_len.push_back( size );
+			string_len.push_back( *size );
 			count_string++;
 			break;
 		    }
@@ -388,9 +399,10 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 			size_t *size = new size_t;
 			*size = (size_t)( (int)*(value.length) );
 			char *val = new char[ *size ];
-			memcpy( val, (char *)value.buffer, *size );
+			char *buffer = (char *)value.buffer;
+			memcpy( val, buffer, *size );
 			string_vals.push_back( val );
-			string_len.push_back( size );
+			string_len.push_back( *size );
 			count_string++;
 			break;
 		    }
@@ -399,7 +411,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			double *val = new double;
 			*val = (double)*(long long *)value.buffer;
-			num_vals.push_back( val );
+			num_vals.push_back( *val );
 			count_num++;
 			break;
 		    }
@@ -408,7 +420,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			double *val = new double;
 			*val = (double)*(unsigned long long *)value.buffer;
-			num_vals.push_back( val );
+			num_vals.push_back( *val );
 			count_num++;
 			break;
 		    }
@@ -417,7 +429,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			int *val = new int;
 			*val = *(int*)value.buffer;
-			int_vals.push_back( val );
+			int_vals.push_back( *val );
 			count_int++;
 			break;
 		    }
@@ -426,7 +438,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			double *val = new double;
 			*val = (double)*(unsigned int*)value.buffer;
-			num_vals.push_back( val );
+			num_vals.push_back( *val );
 			count_num++;
 			break;
 		    }
@@ -435,7 +447,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			int *val = new int;
 			*val = (int)*(short*)value.buffer;
-			int_vals.push_back( val );
+			int_vals.push_back( *val );
 			count_int++;
 			break;
 		    }
@@ -444,7 +456,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			int *val = new int;
 			*val = (int)*(unsigned short*)value.buffer;
-			int_vals.push_back( val );
+			int_vals.push_back( *val );
 			count_int++;
 			break;
 		    }
@@ -453,7 +465,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			int *val = new int;
 			*val = (int)*(char *)value.buffer;
-			int_vals.push_back( val );
+			int_vals.push_back( *val );
 			count_int++;
 			break;
 		    }
@@ -462,7 +474,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			int *val = new int;
 			*val = (int)*(unsigned char *)value.buffer;
-			int_vals.push_back( val );
+			int_vals.push_back( *val );
 			count_int++;
 			break;
 		    }
@@ -471,7 +483,7 @@ bool fetchResultSet( a_sqlany_stmt 			*sqlany_stmt
 		    {
 			double *val = new double;
 			*val = (double)*(double *)value.buffer;
-			num_vals.push_back( val );
+			num_vals.push_back( *val );
 			count_num++;
 			break;
 		    }
